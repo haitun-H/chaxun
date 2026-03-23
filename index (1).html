@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>X Layer USDT0 查询工具</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.7.0/ethers.umd.min.js"></script>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; background-color: #f5f7fa; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        input[type="text"] { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        button { background-color: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; }
+        button:hover { background-color: #0056b3; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { text-align: left; padding: 8px; border-bottom: 1px solid #ddd; }
+        .loading { color: #666; font-style: italic; }
+    </style>
+</head>
+<body>
+
+    <h2>X Layer USDT0 查询工具</h2>
+
+    <div class="card">
+        <h3>查询面板</h3>
+        <label for="walletAddress">请输入钱包地址:</label>
+        <input type="text" id="walletAddress" placeholder="例如: 0x1234...">
+        <button onclick="queryData()">查询余额与记录</button>
+    </div>
+
+    <div class="card" id="balanceCard" style="display: none;">
+        <h3>当前 USDT0 余额</h3>
+        <p id="balanceResult" style="font-size: 24px; font-weight: bold; color: #28a745;">0.00</p>
+    </div>
+
+    <div class="card" id="recordsCard" style="display: none;">
+        <h3>最近转账记录 (接收与发送)</h3>
+        <div id="loadingStatus" class="loading"></div>
+        <table>
+            <thead>
+                <tr>
+                    <th>区块号</th>
+                    <th>类型</th>
+                    <th>对方地址</th>
+                    <th>数量</th>
+                </tr>
+            </thead>
+            <tbody id="recordsTableBody">
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        // 这里直接调用 Vercel 提供的 Serverless 代理接口
+        const PROXY_RPC_URL = '/api/rpc'; 
+        
+        // 你提供的 USDT0 合约地址
+        const USDT0_CONTRACT_ADDRESS = '0x779ded0c9e1022225f8e0630b35a9b54be713736';
+
+        const erc20Abi = [
+            "function balanceOf(address owner) view returns (uint256)",
+            "function decimals() view returns (uint8)",
+            "event Transfer(address indexed from, address indexed to, uint256 value)"
+        ];
+
+        async function queryData() {
+            const walletAddress = document.getElementById('walletAddress').value.trim();
+            if (!walletAddress || !ethers.isAddress(walletAddress)) {
+                alert('请输入有效的地址！');
+                return;
+            }
+
+            document.getElementById('balanceCard').style.display = 'block';
+            document.getElementById('recordsCard').style.display = 'block';
+            document.getElementById('balanceResult').innerText = '查询中...';
+            document.getElementById('loadingStatus').innerText = '正在拉取最近的区块日志，请稍候...';
+            document.getElementById('recordsTableBody').innerHTML = '';
+
+            try {
+                const provider = new ethers.JsonRpcProvider(PROXY_RPC_URL);
+                const contract = new ethers.Contract(USDT0_CONTRACT_ADDRESS, erc20Abi, provider);
+
+                const decimals = await contract.decimals();
+
+                // 1. 查询余额
+                const balanceRaw = await contract.balanceOf(walletAddress);
+                const balanceFormatted = ethers.formatUnits(balanceRaw, decimals);
+                document.getElementById('balanceResult').innerText = balanceFormatted;
+
+                // 2. 查询转账记录 (查最近 5000 个区块，防止节点报错)
+                const currentBlock = await provider.getBlockNumber();
+                const startBlock = currentBlock - 5000; 
+
+                const filterFrom = contract.filters.Transfer(walletAddress, null);
+                const filterTo = contract.filters.Transfer(null, walletAddress);
+
+                const [logsFrom, logsTo] = await Promise.all([
+                    contract.queryFilter(filterFrom, startBlock, currentBlock),
+                    contract.queryFilter(filterTo, startBlock, currentBlock)
+                ]);
+
+                const allLogs = [...logsFrom, ...logsTo].sort((a, b) => b.blockNumber - a.blockNumber);
+
+                document.getElementById('loadingStatus').innerText = allLogs.length > 0 ? '' : '最近 5000 个区块内无转账记录。';
+
+                const tableBody = document.getElementById('recordsTableBody');
+                allLogs.forEach(log => {
+                    const parsedLog = contract.interface.parseLog(log);
+                    const from = parsedLog.args[0];
+                    const to = parsedLog.args[1];
+                    const value = ethers.formatUnits(parsedLog.args[2], decimals);
+
+                    const isReceive = to.toLowerCase() === walletAddress.toLowerCase();
+                    const type = isReceive ? '<span style="color:green;">接收</span>' : '<span style="color:red;">发送</span>';
+                    const counterparty = isReceive ? from : to;
+
+                    const row = `<tr>
+                        <td>${log.blockNumber}</td>
+                        <td>${type}</td>
+                        <td title="${counterparty}">${counterparty.substring(0, 8)}...${counterparty.substring(counterparty.length - 6)}</td>
+                        <td>${value}</td>
+                    </tr>`;
+                    tableBody.innerHTML += row;
+                });
+
+            } catch (error) {
+                console.error(error);
+                document.getElementById('balanceResult').innerText = '查询失败';
+                document.getElementById('loadingStatus').innerText = '获取记录失败，可能节点响应超时。';
+            }
+        }
+    </script>
+</body>
+</html>
